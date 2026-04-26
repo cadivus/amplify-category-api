@@ -12,14 +12,20 @@
  *  - @auth / @hasMany / @belongsTo / @index survive round-tripping
  *  - correct scalar types (Int, Boolean, AWSTimestamp)
  *  - checklist content for the three distinct cases (nothing-to-do,
- *    schema-modified-no-m2m, m2m-detected) and opt-out of colour codes.
+ *    schema-modified-no-m2m, m2m-detected).
+ *
+ * Colour codes: we disable chalk globally here so assertions can match on
+ * plain substrings without worrying about ANSI escape bytes.
  */
+import chalk from 'chalk';
 import {
   buildMigrationChecklist,
   injectSyncFields,
   MIGRATION_GUIDE_URL,
   SYNC_FIELD_NAMES,
 } from '../../../../provider-utils/awscloudformation/utils/preserve-sync-fields';
+
+chalk.level = 0;
 
 /**
  * Assert that all three sync fields are present on a given @model type in
@@ -265,7 +271,6 @@ describe('buildMigrationChecklist', () => {
     const lines = buildMigrationChecklist({
       modifiedModels: [],
       manyToManyRelations: [],
-      colored: false,
     });
     const infoLines = lines.filter((l) => l.level === 'info').map((l) => l.message);
     expect(infoLines.join('\n')).toMatch(/already declare _version/);
@@ -279,7 +284,6 @@ describe('buildMigrationChecklist', () => {
     const lines = buildMigrationChecklist({
       modifiedModels: ['User', 'Board', 'Card'],
       manyToManyRelations: [],
-      colored: false,
     });
     const text = lines.map((l) => l.message).join('\n');
     expect(text).toContain('Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp into 3 @model types');
@@ -294,7 +298,6 @@ describe('buildMigrationChecklist', () => {
       manyToManyRelations: [
         { relationName: 'CardLabel', sourceModels: ['Card', 'Label'] },
       ],
-      colored: false,
     });
     const text = lines.map((l) => l.message).join('\n');
     expect(text).toContain('CardLabel  (from Card ↔ Label)');
@@ -306,17 +309,15 @@ describe('buildMigrationChecklist', () => {
     const lines = buildMigrationChecklist({
       modifiedModels: ['Todo'],
       manyToManyRelations: [],
-      colored: false,
     });
     const text = lines.map((l) => l.message).join('\n');
     expect(text).toMatch(/1 @model type:$/m);
   });
 
-  it('does not include ANSI escapes when colored: false', () => {
+  it('does not include ANSI escapes (chalk is disabled globally in tests)', () => {
     const lines = buildMigrationChecklist({
       modifiedModels: ['Todo'],
       manyToManyRelations: [],
-      colored: false,
     });
     for (const line of lines) {
       // \u001b is ESC, start of ANSI escape sequences
