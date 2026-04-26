@@ -30,6 +30,7 @@ import { authConfigToAppSyncAuthType } from '../utils/auth-config-to-app-sync-au
 import { checkAppsyncApiResourceMigration } from '../utils/check-appsync-api-migration';
 import { defineGlobalSandboxMode } from '../utils/global-sandbox-mode';
 import { resolverConfigToConflictResolution } from '../utils/resolver-config-to-conflict-resolution-bi-di-mapper';
+import { injectSyncFields } from '../helpers/preserve-sync-fields';
 
 const serviceName = 'AppSync';
 const elasticContainerServiceName = 'ElasticContainer';
@@ -340,7 +341,85 @@ export const serviceApiInputWalkthrough = async (context: $TSContext, serviceMet
   };
 };
 
-const updateApiInputWalkthrough = async (context: $TSContext, project: Record<string, any>, resolverConfig, modelTypes) => {
+/**
+ * Before disabling conflict resolution, mutate the user's `schema.graphql`
+ * so every `@model` declares the three DataStore metadata fields
+ * (`_version`, `_deleted`, `_lastChangedAt`) as regular user fields.
+ *
+ * Why: disabling conflict resolution tells the GraphQL transformer to stop
+ * emitting those fields on every model type and every Update…Input. Any
+ * frontend code wired to DataStore breaks with a GraphQL validation error
+ * the moment it runs. Pre-declaring the fields keeps them in the schema
+ * (no longer server-managed, but present and queryable), which keeps the
+ * frontend compiling and running while the user migrates.
+ *
+ * See: https://github.com/aws-amplify/docs/pull/8578
+ *
+ * @param resourceDir Absolute path to `amplify/backend/api/<name>/`.
+ */
+const preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<void> => {
+  const schemaPath = path.join(resourceDir, 'schema.graphql');
+  if (!(await fs.pathExists(schemaPath))) {
+    printer.warn(
+      `preserveSyncFields: no schema.graphql at ${schemaPath} — skipping metadata field injection. ` +
+        `If you use the split schema/ directory layout you will need to add _version/_deleted/_lastChangedAt manually.`,
+    );
+    return;
+  }
+
+  const original = (await fs.readFile(schemaPath)).toString();
+  const { updated, modifiedModels, manyToManyModels } = injectSyncFields(original);
+
+  if (modifiedModels.length === 0) {
+    printer.info('All @model types already declare _version / _deleted / _lastChangedAt — no schema changes needed.');
+  } else {
+    await fs.writeFile(schemaPath, updated);
+    printer.info(
+      chalk.cyan(
+        `Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp into ${modifiedModels.length} ` +
+          `@model type${modifiedModels.length === 1 ? '' : 's'}:`,
+      ),
+    );
+    modifiedModels.forEach((name) => printer.info(`  • ${name}`));
+  }
+
+  printer.warn('');
+  printer.warn(chalk.yellow.bold('⚠  DataStore → AppSync migration checklist'));
+  printer.warn(chalk.yellow('   Disabling conflict detection is a breaking change for any code using `DataStore.*`.'));
+  printer.warn('');
+
+  if (manyToManyModels.length > 0) {
+    printer.warn(
+      chalk.yellow.bold('   @manyToMany join types NOT modified (auto-synthesized, not in schema.graphql):'),
+    );
+    manyToManyModels.forEach((name) => printer.warn(chalk.yellow(`     • ${name}`)));
+    printer.warn(
+      chalk.yellow(
+        '   Soft-deleted rows in join tables will linger in DynamoDB after disable. A one-time ' +
+          'cleanup pass is recommended — see migration guide below.',
+      ),
+    );
+    printer.warn('');
+  }
+
+  printer.warn(chalk.yellow.bold('   Runtime behaviour changes you must handle in your app:'));
+  printer.warn(chalk.yellow('     • `delete*` mutations become HARD deletes (row is removed from DynamoDB).'));
+  printer.warn(chalk.yellow('       Any UI that relied on `_deleted: true` soft-deletes will silently stop working.'));
+  printer.warn(chalk.yellow('     • `_version` is NO LONGER auto-incremented by the AppSync resolver.'));
+  printer.warn(chalk.yellow('       Mutations now accept the field but the value is meaningless.'));
+  printer.warn(chalk.yellow('     • `sync*` queries and `observeQuery` subscriptions are GONE — migrate to `list*` + `onCreate*`/`onUpdate*`/`onDelete*`.'));
+  printer.warn('');
+  printer.warn(chalk.yellow('   Migration guide: https://github.com/aws-amplify/docs/pull/8578'));
+  printer.warn('');
+};
+
+const updateApiInputWalkthrough = async (
+  context: $TSContext,
+  project: Record<string, any>,
+  resolverConfig,
+  modelTypes,
+  resourceDir: string,
+) => {
   let authConfig;
   let defaultAuthType;
   const updateChoices = [
@@ -379,6 +458,7 @@ const updateApiInputWalkthrough = async (context: $TSContext, project: Record<st
     resolverConfig = await askResolverConflictHandlerQuestion(context, modelTypes);
   } else if (updateOption === 'DISABLE_CONFLICT') {
     resolverConfig = {};
+    await preserveSyncFieldsOnDisable(resourceDir);
   } else if (updateOption === 'AUTH_MODE') {
     ({ authConfig, defaultAuthType } = await askDefaultAuthQuestion(context));
     authConfig = await askAdditionalAuthQuestions(context, authConfig, defaultAuthType);
@@ -483,7 +563,7 @@ export const updateWalkthrough = async (context: $TSContext): Promise<UpdateApiR
     });
   }
 
-  ({ authConfig, resolverConfig } = await updateApiInputWalkthrough(context, project, resolverConfig, modelTypes));
+  ({ authConfig, resolverConfig } = await updateApiInputWalkthrough(context, project, resolverConfig, modelTypes, resourceDir));
 
   return {
     version: 1,
