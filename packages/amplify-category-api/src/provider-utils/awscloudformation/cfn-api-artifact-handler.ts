@@ -30,30 +30,10 @@ import { authConfigHasApiKey, checkIfAuthExists, getAppSyncAuthConfig, getAppSyn
 import { appSyncAuthTypeToAuthConfig } from './utils/auth-config-to-app-sync-auth-type-bi-di-mapper';
 import { printApiKeyWarnings } from './utils/print-api-key-warnings';
 import { conflictResolutionToResolverConfig } from './utils/resolver-config-to-conflict-resolution-bi-di-mapper';
-import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from './utils/preserve-sync-fields';
+import { preserveSyncFieldsOnDisable } from './utils/preserve-sync-fields';
 
 // keep in sync with ServiceName in amplify-category-function, but probably it will not change
 const FunctionServiceNameLambdaFunction = 'Lambda';
-
-/**
- * File name we write a pre-disable backup copy to so users can `diff` the
- * schema they started with against the injected version.
- */
-const SCHEMA_BACKUP_FILENAME = 'schema.graphql.pre-disable-backup';
-
-/**
- * Emit a list of {@link ChecklistLine}s to `printer`, routing by level.
- * @param lines output of `buildMigrationChecklist`
- */
-const emitChecklist = (lines: ChecklistLine[]): void => {
-  for (const line of lines) {
-    if (line.level === 'warn') {
-      printer.warn(line.message);
-    } else {
-      printer.info(line.message);
-    }
-  }
-};
 
 /**
  * Factory function that returns an ApiArtifactHandler instance
@@ -227,73 +207,8 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
     const priorTransformerConfig = await readTransformerConfiguration(resourceDir);
     const priorlyEnabled = !_.isEmpty(priorTransformerConfig?.ResolverConfig);
     if (payloadRequestsDisable && priorlyEnabled) {
-      await this.preserveSyncFieldsOnDisable(resourceDir);
+      await preserveSyncFieldsOnDisable(resourceDir);
     }
-  };
-
-  /**
-   * Before disabling conflict resolution (removing it from transform.conf.json),
-   * mutate the user's `schema.graphql` so every `@model` declares the three
-   * DataStore metadata fields (`_version`, `_deleted`, `_lastChangedAt`) as
-   * regular user fields. Otherwise the transformer will strip those fields
-   * from the generated AppSync schema on the next push, and any frontend code
-   * still sending them in mutation inputs will fail with a GraphQL validation
-   * error.
-   *
-   * Side effects:
-   *  - Creates a one-time backup at `schema.graphql.pre-disable-backup`
-   *    the first time it runs so the user can diff before/after.
-   *  - Emits a formatted migration checklist to the CLI.
-   *
-   * See: https://github.com/aws-amplify/docs/pull/8578
-   *
-   * @param resourceDir Absolute path to `amplify/backend/api/<name>/`.
-   */
-  private preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<void> => {
-    const schemaPath = path.join(resourceDir, 'schema.graphql');
-    if (!(await fs.pathExists(schemaPath))) {
-      printer.warn(
-        `preserveSyncFields: no schema.graphql at ${schemaPath} — skipping metadata field injection. ` +
-          'If you use the split schema/ directory layout you will need to add _version/_deleted/_lastChangedAt manually.',
-      );
-      return;
-    }
-
-    let original: string;
-    try {
-      original = (await fs.readFile(schemaPath)).toString();
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      printer.warn(`preserveSyncFields: failed to read ${schemaPath}: ${msg}. Skipping injection.`);
-      return;
-    }
-
-    let result: ReturnType<typeof injectSyncFields>;
-    try {
-      result = injectSyncFields(original);
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      printer.warn(
-        `preserveSyncFields: schema.graphql failed to parse (${msg}). ` +
-          'Skipping injection — please add _version/_deleted/_lastChangedAt manually.',
-      );
-      return;
-    }
-
-    if (result.modifiedModels.length > 0) {
-      const backupPath = path.join(resourceDir, SCHEMA_BACKUP_FILENAME);
-      if (!(await fs.pathExists(backupPath))) {
-        await fs.writeFile(backupPath, original);
-      }
-      await fs.writeFile(schemaPath, result.updated);
-    }
-
-    emitChecklist(
-      buildMigrationChecklist({
-        modifiedModels: result.modifiedModels,
-        manyToManyRelations: result.manyToManyRelations,
-      }),
-    );
   };
 
   private getResourceDir = (apiName: string): string => pathManager.getResourceDirectoryPath(undefined, category, apiName);

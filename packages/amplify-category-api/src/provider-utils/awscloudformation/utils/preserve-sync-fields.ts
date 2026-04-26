@@ -22,6 +22,9 @@
  * See the migration guide: https://github.com/aws-amplify/docs/pull/8578
  */
 /* eslint-disable no-underscore-dangle */
+import * as path from 'path';
+import * as fs from 'fs-extra';
+import { printer } from '@aws-amplify/amplify-prompts';
 import chalk from 'chalk';
 import {
   parse,
@@ -405,3 +408,92 @@ const buildFooter = (color: ColorSet): ChecklistLine[] => [
   { level: 'warn', message: color.yellow(`   Migration guide: ${MIGRATION_GUIDE_URL}`) },
   { level: 'warn', message: '' },
 ];
+
+/**
+ * File name of the one-time backup written next to `schema.graphql` the first
+ * time {@link preserveSyncFieldsOnDisable} runs, so users can diff
+ * before/after.
+ */
+export const SCHEMA_BACKUP_FILENAME = 'schema.graphql.pre-disable-backup';
+
+/**
+ * Route a list of {@link ChecklistLine}s to `printer`, per-line level.
+ *
+ * @param lines output of {@link buildMigrationChecklist}.
+ */
+const emitChecklist = (lines: ChecklistLine[]): void => {
+  for (const line of lines) {
+    if (line.level === 'warn') {
+      printer.warn(line.message);
+    } else {
+      printer.info(line.message);
+    }
+  }
+};
+
+/**
+ * End-to-end "preserve sync fields" side-effecting routine.
+ *
+ * Reads `<resourceDir>/schema.graphql`, runs {@link injectSyncFields} on it,
+ * writes the rewritten schema back (creating a one-time backup at
+ * `<resourceDir>/schema.graphql.pre-disable-backup`), and emits the migration
+ * checklist to `printer`. Used by both the interactive `amplify update api`
+ * walkthrough and the headless `cfn-api-artifact-handler` so the two
+ * codepaths behave identically.
+ *
+ * Soft-fail semantics: any filesystem or parser error produces a
+ * `printer.warn` describing what to do manually and returns. Disabling
+ * conflict resolution is a destructive operation the user has explicitly
+ * requested — failing loud here would strand them mid-update with a
+ * confusing stack trace.
+ *
+ * See: https://github.com/aws-amplify/docs/pull/8578
+ *
+ * @param resourceDir Absolute path to `amplify/backend/api/<name>/`.
+ */
+export const preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<void> => {
+  const schemaPath = path.join(resourceDir, 'schema.graphql');
+  if (!(await fs.pathExists(schemaPath))) {
+    printer.warn(
+      `preserveSyncFields: no schema.graphql at ${schemaPath} — skipping metadata field injection. ` +
+        'If you use the split schema/ directory layout you will need to add _version/_deleted/_lastChangedAt manually.',
+    );
+    return;
+  }
+
+  let original: string;
+  try {
+    original = (await fs.readFile(schemaPath)).toString();
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    printer.warn(`preserveSyncFields: failed to read ${schemaPath}: ${msg}. Skipping injection.`);
+    return;
+  }
+
+  let result: InjectSyncFieldsResult;
+  try {
+    result = injectSyncFields(original);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    printer.warn(
+      `preserveSyncFields: schema.graphql failed to parse (${msg}). ` +
+        'Skipping injection — please add _version/_deleted/_lastChangedAt manually.',
+    );
+    return;
+  }
+
+  if (result.modifiedModels.length > 0) {
+    const backupPath = path.join(resourceDir, SCHEMA_BACKUP_FILENAME);
+    if (!(await fs.pathExists(backupPath))) {
+      await fs.writeFile(backupPath, original);
+    }
+    await fs.writeFile(schemaPath, result.updated);
+  }
+
+  emitChecklist(
+    buildMigrationChecklist({
+      modifiedModels: result.modifiedModels,
+      manyToManyRelations: result.manyToManyRelations,
+    }),
+  );
+};
