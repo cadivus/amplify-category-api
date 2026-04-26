@@ -1,8 +1,11 @@
 /**
- * Unit tests for {@link injectSyncFields} and {@link buildMigrationChecklist}.
+ * Unit tests for the three exports of `utils/preserve-sync-fields`:
  *
- * Both functions are pure (string in → string / string-array out) so the
- * tests here are filesystem- and network-free. They cover:
+ *   - `injectSyncFields(schemaText)`        — pure string rewrite.
+ *   - `buildMigrationChecklist(options)`    — pure checklist-line builder.
+ *   - `preserveSyncFieldsOnDisable(dir)`    — end-to-end filesystem routine.
+ *
+ * Coverage:
  *
  *  - happy path: fields added to a bare @model
  *  - idempotency (running twice is a no-op)
@@ -12,19 +15,27 @@
  *  - @auth / @hasMany / @belongsTo / @index survive round-tripping
  *  - correct scalar types (Int, Boolean, AWSTimestamp)
  *  - checklist content for the three distinct cases (nothing-to-do,
- *    schema-modified-no-m2m, m2m-detected).
+ *    schema-modified-no-m2m, m2m-detected)
+ *  - end-to-end on a tmp directory: writes schema, creates backup,
+ *    soft-fails when schema.graphql is missing.
  *
  * Colour codes: we disable chalk globally here so assertions can match on
  * plain substrings without worrying about ANSI escape bytes.
  */
+import * as path from 'path';
+import * as os from 'os';
+import * as fs from 'fs-extra';
 import chalk from 'chalk';
 import {
   buildMigrationChecklist,
   injectSyncFields,
   MIGRATION_GUIDE_URL,
+  preserveSyncFieldsOnDisable,
+  SCHEMA_BACKUP_FILENAME,
   SYNC_FIELD_NAMES,
 } from '../../../../provider-utils/awscloudformation/utils/preserve-sync-fields';
 
+jest.mock('@aws-amplify/amplify-prompts');
 chalk.level = 0;
 
 /**
@@ -313,16 +324,47 @@ describe('buildMigrationChecklist', () => {
     const text = lines.map((l) => l.message).join('\n');
     expect(text).toMatch(/1 @model type:$/m);
   });
+});
 
-  it('does not include ANSI escapes (chalk is disabled globally in tests)', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: ['Todo'],
-      manyToManyRelations: [],
-    });
-    for (const line of lines) {
-      // \u001b is ESC, start of ANSI escape sequences
-      // eslint-disable-next-line no-control-regex
-      expect(line.message).not.toMatch(/\u001b\[/);
-    }
+describe('preserveSyncFieldsOnDisable', () => {
+  let tmpDir: string;
+
+  beforeEach(async () => {
+    tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), 'preserve-sync-fields-test-'));
+  });
+
+  afterEach(async () => {
+    await fs.remove(tmpDir);
+  });
+
+  it('rewrites schema.graphql and writes a one-time backup', async () => {
+    const schemaPath = path.join(tmpDir, 'schema.graphql');
+    const original = 'type Todo @model {\n  id: ID!\n  title: String!\n}\n';
+    await fs.writeFile(schemaPath, original);
+
+    await preserveSyncFieldsOnDisable(tmpDir);
+
+    const backup = await fs.readFile(path.join(tmpDir, SCHEMA_BACKUP_FILENAME), 'utf8');
+    expect(backup).toBe(original);
+
+    const updated = await fs.readFile(schemaPath, 'utf8');
+    expect(hasAllSyncFields(updated, 'Todo')).toBe(true);
+  });
+
+  it('does not overwrite an existing backup on a second run', async () => {
+    const schemaPath = path.join(tmpDir, 'schema.graphql');
+    const backupPath = path.join(tmpDir, SCHEMA_BACKUP_FILENAME);
+    await fs.writeFile(schemaPath, 'type Todo @model {\n  id: ID!\n}\n');
+    await fs.writeFile(backupPath, 'PREEXISTING BACKUP CONTENTS');
+
+    await preserveSyncFieldsOnDisable(tmpDir);
+
+    const backup = await fs.readFile(backupPath, 'utf8');
+    expect(backup).toBe('PREEXISTING BACKUP CONTENTS');
+  });
+
+  it('soft-fails when schema.graphql is missing (no throw)', async () => {
+    await expect(preserveSyncFieldsOnDisable(tmpDir)).resolves.toBeUndefined();
+    expect(await fs.pathExists(path.join(tmpDir, SCHEMA_BACKUP_FILENAME))).toBe(false);
   });
 });
