@@ -30,7 +30,7 @@ import { authConfigToAppSyncAuthType } from '../utils/auth-config-to-app-sync-au
 import { checkAppsyncApiResourceMigration } from '../utils/check-appsync-api-migration';
 import { defineGlobalSandboxMode } from '../utils/global-sandbox-mode';
 import { resolverConfigToConflictResolution } from '../utils/resolver-config-to-conflict-resolution-bi-di-mapper';
-import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from '../helpers/preserve-sync-fields';
+import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from '../utils/preserve-sync-fields';
 
 const serviceName = 'AppSync';
 const elasticContainerServiceName = 'ElasticContainer';

@@ -19,7 +19,7 @@ import {
   injectSyncFields,
   MIGRATION_GUIDE_URL,
   SYNC_FIELD_NAMES,
-} from '../../provider-utils/awscloudformation/helpers/preserve-sync-fields';
+} from '../../../../provider-utils/awscloudformation/utils/preserve-sync-fields';
 
 /**
  * Assert that all three sync fields are present on a given @model type in

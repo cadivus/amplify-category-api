@@ -30,7 +30,7 @@ import { authConfigHasApiKey, checkIfAuthExists, getAppSyncAuthConfig, getAppSyn
 import { appSyncAuthTypeToAuthConfig } from './utils/auth-config-to-app-sync-auth-type-bi-di-mapper';
 import { printApiKeyWarnings } from './utils/print-api-key-warnings';
 import { conflictResolutionToResolverConfig } from './utils/resolver-config-to-conflict-resolution-bi-di-mapper';
-import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from './helpers/preserve-sync-fields';
+import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from './utils/preserve-sync-fields';
 
 // keep in sync with ServiceName in amplify-category-function, but probably it will not change
 const FunctionServiceNameLambdaFunction = 'Lambda';
