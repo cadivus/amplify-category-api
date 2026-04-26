@@ -204,19 +204,16 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
   /**
    * Decide whether the incoming headless update represents a transition
    * from "DataStore enabled" to "DataStore disabled", and if so run the
-   * schema injection. Also strips the non-standard `preserveSyncFields`
-   * opt-out flag before downstream consumers see it.
+   * schema injection.
    *
-   * The payload must satisfy all of:
+   * The payload must satisfy both of:
    *   1. No `defaultResolutionStrategy` and no `perModelResolutionStrategy`
    *      (i.e., payload is asking to disable conflict resolution).
    *   2. The project currently HAS a `ResolverConfig` in
    *      `transform.conf.json` (i.e., we're truly transitioning
    *      enabled → disabled, not being called on a fresh project).
-   *   3. `preserveSyncFields` is NOT explicitly `false` on the payload.
    *
-   * @param updates the incoming service modification (mutated in-place:
-   *   the non-standard `preserveSyncFields` flag is deleted).
+   * @param updates the incoming service modification.
    * @param resourceDir absolute path to `amplify/backend/api/<name>/`.
    */
   private maybePreserveSyncFieldsOnDisable = async (
@@ -229,12 +226,9 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
       _.isEmpty(updates.conflictResolution.perModelResolutionStrategy);
     const priorTransformerConfig = await readTransformerConfiguration(resourceDir);
     const priorlyEnabled = !_.isEmpty(priorTransformerConfig?.ResolverConfig);
-    const preserveSyncFields =
-      (updates.conflictResolution as { preserveSyncFields?: boolean }).preserveSyncFields !== false;
-    if (payloadRequestsDisable && priorlyEnabled && preserveSyncFields) {
+    if (payloadRequestsDisable && priorlyEnabled) {
       await this.preserveSyncFieldsOnDisable(resourceDir);
     }
-    delete (updates.conflictResolution as { preserveSyncFields?: boolean }).preserveSyncFields;
   };
 
   /**
