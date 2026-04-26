@@ -30,7 +30,7 @@ import { authConfigToAppSyncAuthType } from '../utils/auth-config-to-app-sync-au
 import { checkAppsyncApiResourceMigration } from '../utils/check-appsync-api-migration';
 import { defineGlobalSandboxMode } from '../utils/global-sandbox-mode';
 import { resolverConfigToConflictResolution } from '../utils/resolver-config-to-conflict-resolution-bi-di-mapper';
-import { injectSyncFields, buildMigrationChecklist, ChecklistLine } from '../utils/preserve-sync-fields';
+import { preserveSyncFieldsOnDisable } from '../utils/preserve-sync-fields';
 
 const serviceName = 'AppSync';
 const elasticContainerServiceName = 'ElasticContainer';
@@ -341,93 +341,7 @@ export const serviceApiInputWalkthrough = async (context: $TSContext, serviceMet
   };
 };
 
-/**
- * File name we write a pre-disable backup copy to so users can `diff` the
- * schema they started with against the injected version.
- */
-const SCHEMA_BACKUP_FILENAME = 'schema.graphql.pre-disable-backup';
 
-/**
- * Emit a list of {@link ChecklistLine}s to `printer`, routing by level.
- * @param lines output of {@link buildMigrationChecklist}
- */
-const emitChecklist = (lines: ChecklistLine[]): void => {
-  for (const line of lines) {
-    if (line.level === 'warn') {
-      printer.warn(line.message);
-    } else {
-      printer.info(line.message);
-    }
-  }
-};
-
-/**
- * Before disabling conflict resolution, mutate the user's `schema.graphql`
- * so every `@model` declares the three DataStore metadata fields
- * (`_version`, `_deleted`, `_lastChangedAt`) as regular user fields.
- *
- * Why: disabling conflict resolution tells the GraphQL transformer to stop
- * emitting those fields on every model type and every Update…Input. Any
- * frontend code wired to DataStore breaks with a GraphQL validation error
- * the moment it runs. Pre-declaring the fields keeps them in the schema
- * (no longer server-managed, but present and queryable), which keeps the
- * frontend compiling and running while the user migrates.
- *
- * Side effects:
- *  - Creates a one-time backup at `schema.graphql.pre-disable-backup`
- *    the first time it runs so the user can diff before/after.
- *  - Emits a formatted migration checklist to the CLI.
- *
- * See: https://github.com/aws-amplify/docs/pull/8578
- *
- * @param resourceDir Absolute path to `amplify/backend/api/<name>/`.
- */
-const preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<void> => {
-  const schemaPath = path.join(resourceDir, 'schema.graphql');
-  if (!(await fs.pathExists(schemaPath))) {
-    printer.warn(
-      `preserveSyncFields: no schema.graphql at ${schemaPath} — skipping metadata field injection. ` +
-        'If you use the split schema/ directory layout you will need to add _version/_deleted/_lastChangedAt manually.',
-    );
-    return;
-  }
-
-  let original: string;
-  try {
-    original = (await fs.readFile(schemaPath)).toString();
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    printer.warn(`preserveSyncFields: failed to read ${schemaPath}: ${msg}. Skipping injection.`);
-    return;
-  }
-
-  let result: ReturnType<typeof injectSyncFields>;
-  try {
-    result = injectSyncFields(original);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    printer.warn(
-      `preserveSyncFields: schema.graphql failed to parse (${msg}). ` +
-        'Skipping injection — please add _version/_deleted/_lastChangedAt manually.',
-    );
-    return;
-  }
-
-  if (result.modifiedModels.length > 0) {
-    const backupPath = path.join(resourceDir, SCHEMA_BACKUP_FILENAME);
-    if (!(await fs.pathExists(backupPath))) {
-      await fs.writeFile(backupPath, original);
-    }
-    await fs.writeFile(schemaPath, result.updated);
-  }
-
-  emitChecklist(
-    buildMigrationChecklist({
-      modifiedModels: result.modifiedModels,
-      manyToManyRelations: result.manyToManyRelations,
-    }),
-  );
-};
 
 const updateApiInputWalkthrough = async (
   context: $TSContext,
