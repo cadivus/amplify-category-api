@@ -341,8 +341,6 @@ export const serviceApiInputWalkthrough = async (context: $TSContext, serviceMet
   };
 };
 
-
-
 const updateApiInputWalkthrough = async (
   context: $TSContext,
   project: Record<string, any>,
