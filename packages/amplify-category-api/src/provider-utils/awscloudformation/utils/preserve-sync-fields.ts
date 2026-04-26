@@ -1,27 +1,25 @@
 /**
- * Helpers that support preserving DataStore conflict-resolution metadata
- * fields when a user disables conflict detection in `amplify update api`.
+ * Preserve the DataStore conflict-resolution metadata fields
+ * (`_version`, `_deleted`, `_lastChangedAt`) when a user disables conflict
+ * detection on an `@model`-based AppSync API.
  *
- * Two exports:
+ * The GraphQL transformer normally owns these three fields — it emits them
+ * on every generated object type and every `Update…Input` as long as
+ * conflict resolution is on, and strips them the moment it is off. Any
+ * frontend code that still sends them (which is every DataStore client)
+ * then fails AppSync's request validation. This module rewrites the user's
+ * `schema.graphql` so the fields are declared as regular user fields
+ * BEFORE the transformer runs, keeping them in the schema (no longer
+ * server-managed, but present and queryable) across the disable.
  *
- *  - `injectSyncFields(schemaText)` — pure string → { string, lists } function
- *    that rewrites a user's `schema.graphql` so every `@model` declares the
- *    three DataStore metadata fields (`_version`, `_deleted`, `_lastChangedAt`)
- *    as regular user fields. Also enumerates any `@manyToMany` relations it
- *    detected so the caller can surface an actionable warning about the
- *    auto-synthesized join types (which this helper cannot reach).
+ * Exports:
+ *   - `injectSyncFields(schemaText)` — pure rewrite of a schema string.
+ *   - `buildMigrationChecklist(options)` — pure console-output builder.
+ *   - `preserveSyncFieldsOnDisable(resourceDir)` — end-to-end filesystem routine.
+ *   - Constants: `SYNC_FIELD_NAMES`, `MIGRATION_GUIDE_URL`, `SCHEMA_BACKUP_FILENAME`.
  *
- *  - `buildMigrationChecklist(options)` — pure function returning the
- *    formatted console-output lines explaining what just happened and what
- *    the user must do next. Centralized so the interactive walkthrough and
- *    the headless artifact handler emit the exact same guidance.
- *
- * The module is intentionally pure: no filesystem, no logging, no prompts.
- * That makes it trivially testable and safe to call from either codepath.
- *
- * See the migration guide: https://github.com/aws-amplify/docs/pull/8578
+ * See: https://github.com/aws-amplify/docs/pull/8578
  */
-/* eslint-disable no-underscore-dangle */
 import * as path from 'path';
 import * as fs from 'fs-extra';
 import { printer } from '@aws-amplify/amplify-prompts';
