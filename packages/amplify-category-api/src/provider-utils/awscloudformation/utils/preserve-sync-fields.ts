@@ -110,11 +110,6 @@ export interface MigrationChecklistOptions {
   modifiedModels: string[];
   /** Detail of `@manyToMany` relations the caller discovered. */
   manyToManyRelations: ManyToManyRelation[];
-  /**
-   * If true (default), wrap messages in `chalk` ANSI colour codes.
-   * Set false for tests or log capture.
-   */
-  colored?: boolean;
 }
 
 /**
@@ -246,49 +241,29 @@ export const injectSyncFields = (schemaText: string): InjectSyncFieldsResult => 
  * The caller is responsible for routing each line to the appropriate
  * `printer` method based on the `level` field.
  *
+ * `chalk` is called unconditionally; it auto-detects whether the output
+ * stream is a TTY and no-ops otherwise, so log capture / CI / piped output
+ * all get clean strings.
+ *
  * @param options see {@link MigrationChecklistOptions}.
  * @returns array of `{ level, message }` ready to pass to `printer.info` / `printer.warn`.
  */
-export const buildMigrationChecklist = (options: MigrationChecklistOptions): ChecklistLine[] => {
-  const colored = options.colored ?? true;
-  const color = makeColorSet(colored);
-  return [
-    ...buildInjectionSummary(options.modifiedModels, color),
-    ...buildHeader(color),
-    ...buildManyToManySection(options.manyToManyRelations, color),
-    ...buildRuntimeChangesSection(color),
-    ...buildFooter(color),
-  ];
-};
-
-interface ColorSet {
-  cyan: (s: string) => string;
-  yellow: (s: string) => string;
-  yellowBold: (s: string) => string;
-}
-
-/**
- * Returns a set of colour-applying functions that either wrap strings in
- * chalk codes (when `colored` is true) or pass them through unchanged.
- *
- * @param colored if `true`, apply chalk ANSI codes; if `false`, return input unchanged.
- * @returns the three colour functions used by the checklist builders.
- */
-const makeColorSet = (colored: boolean): ColorSet => ({
-  cyan: (s: string): string => (colored ? chalk.cyan(s) : s),
-  yellow: (s: string): string => (colored ? chalk.yellow(s) : s),
-  yellowBold: (s: string): string => (colored ? chalk.yellow.bold(s) : s),
-});
+export const buildMigrationChecklist = (options: MigrationChecklistOptions): ChecklistLine[] => [
+  ...buildInjectionSummary(options.modifiedModels),
+  ...buildHeader(),
+  ...buildManyToManySection(options.manyToManyRelations),
+  ...buildRuntimeChangesSection(),
+  ...buildFooter(),
+];
 
 /**
  * Build the opening block: either an "already done, no changes" info line
  * or a cyan "Injected … into N @model types" line with a bullet per model.
  *
  * @param modifiedModels model names returned from `injectSyncFields`.
- * @param color colour helper.
  * @returns checklist lines describing what (if anything) was injected.
  */
-const buildInjectionSummary = (modifiedModels: string[], color: ColorSet): ChecklistLine[] => {
+const buildInjectionSummary = (modifiedModels: string[]): ChecklistLine[] => {
   if (modifiedModels.length === 0) {
     return [
       {
@@ -301,7 +276,7 @@ const buildInjectionSummary = (modifiedModels: string[], color: ColorSet): Check
   return [
     {
       level: 'info',
-      message: color.cyan(
+      message: chalk.cyan(
         'Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp ' +
           `into ${modifiedModels.length} @model type${plural}:`,
       ),
@@ -313,15 +288,14 @@ const buildInjectionSummary = (modifiedModels: string[], color: ColorSet): Check
 /**
  * Build the "DataStore → AppSync migration checklist" banner.
  *
- * @param color colour helper.
  * @returns two warn lines (banner + intro) surrounded by blank spacer lines.
  */
-const buildHeader = (color: ColorSet): ChecklistLine[] => [
+const buildHeader = (): ChecklistLine[] => [
   { level: 'warn', message: '' },
-  { level: 'warn', message: color.yellowBold('⚠  DataStore → AppSync migration checklist') },
+  { level: 'warn', message: chalk.yellow.bold('⚠  DataStore → AppSync migration checklist') },
   {
     level: 'warn',
-    message: color.yellow('   Disabling conflict detection is a breaking change for any code using DataStore.*.'),
+    message: chalk.yellow('   Disabling conflict detection is a breaking change for any code using DataStore.*.'),
   },
   { level: 'warn', message: '' },
 ];
@@ -331,25 +305,21 @@ const buildHeader = (color: ColorSet): ChecklistLine[] => [
  * @manyToMany relations were detected.
  *
  * @param relations relations returned from `injectSyncFields`.
- * @param color colour helper.
  * @returns checklist lines explaining the impact of synthesized join types.
  */
-const buildManyToManySection = (
-  relations: ManyToManyRelation[],
-  color: ColorSet,
-): ChecklistLine[] => {
+const buildManyToManySection = (relations: ManyToManyRelation[]): ChecklistLine[] => {
   if (relations.length === 0) return [];
   const lines: ChecklistLine[] = [
     {
       level: 'warn',
-      message: color.yellowBold('   @manyToMany relations detected — the synthesized join types stay unchanged:'),
+      message: chalk.yellow.bold('   @manyToMany relations detected — the synthesized join types stay unchanged:'),
     },
   ];
   for (const rel of relations) {
     const sources = rel.sourceModels.join(' ↔ ');
     lines.push({
       level: 'warn',
-      message: color.yellow(`     • ${rel.relationName}  (from ${sources})`),
+      message: chalk.yellow(`     • ${rel.relationName}  (from ${sources})`),
     });
   }
   const prose = [
@@ -361,7 +331,7 @@ const buildManyToManySection = (
     '       tables (DynamoDB: Scan + DeleteItem where _deleted == true) if this bothers you.',
   ];
   for (const line of prose) {
-    lines.push({ level: 'warn', message: color.yellow(line) });
+    lines.push({ level: 'warn', message: chalk.yellow(line) });
   }
   lines.push({ level: 'warn', message: '' });
   return lines;
@@ -372,10 +342,9 @@ const buildManyToManySection = (
  * hard-deletes, non-incrementing `_version`, and the absence of sync*
  * queries / observeQuery.
  *
- * @param color colour helper.
  * @returns checklist lines for the runtime-changes block.
  */
-const buildRuntimeChangesSection = (color: ColorSet): ChecklistLine[] => {
+const buildRuntimeChangesSection = (): ChecklistLine[] => {
   const prose = [
     '     • delete<Model> mutations become HARD deletes (the DynamoDB row is removed).',
     '       - Any UI that still treats _deleted: true as a soft-delete/tombstone will silently break.',
@@ -391,21 +360,20 @@ const buildRuntimeChangesSection = (color: ColorSet): ChecklistLine[] => {
   return [
     {
       level: 'warn',
-      message: color.yellowBold('   Runtime behaviour changes you must handle in your app:'),
+      message: chalk.yellow.bold('   Runtime behaviour changes you must handle in your app:'),
     },
-    ...prose.map<ChecklistLine>((line) => ({ level: 'warn', message: color.yellow(line) })),
+    ...prose.map<ChecklistLine>((line) => ({ level: 'warn', message: chalk.yellow(line) })),
   ];
 };
 
 /**
  * Build the footer: a blank line, the migration-guide URL, and a trailing spacer.
  *
- * @param color colour helper.
  * @returns three checklist lines.
  */
-const buildFooter = (color: ColorSet): ChecklistLine[] => [
+const buildFooter = (): ChecklistLine[] => [
   { level: 'warn', message: '' },
-  { level: 'warn', message: color.yellow(`   Migration guide: ${MIGRATION_GUIDE_URL}`) },
+  { level: 'warn', message: chalk.yellow(`   Migration guide: ${MIGRATION_GUIDE_URL}`) },
   { level: 'warn', message: '' },
 ];
 
