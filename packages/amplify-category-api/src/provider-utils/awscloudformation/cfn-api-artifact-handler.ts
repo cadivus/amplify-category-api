@@ -30,6 +30,8 @@ import { authConfigHasApiKey, checkIfAuthExists, getAppSyncAuthConfig, getAppSyn
 import { appSyncAuthTypeToAuthConfig } from './utils/auth-config-to-app-sync-auth-type-bi-di-mapper';
 import { printApiKeyWarnings } from './utils/print-api-key-warnings';
 import { conflictResolutionToResolverConfig } from './utils/resolver-config-to-conflict-resolution-bi-di-mapper';
+import { injectSyncFields } from './helpers/preserve-sync-fields';
+import chalk from 'chalk';
 
 // keep in sync with ServiceName in amplify-category-function, but probably it will not change
 const FunctionServiceNameLambdaFunction = 'Lambda';
@@ -135,6 +137,25 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
     // Because we rely on an in-place update for 'NEW' lambda conflictResolution types, we
     // execute this behavior before the call to `updateAppsyncCLIInputs`.
     if (updates.conflictResolution) {
+      // Detect a "disable conflict resolution" request: payload has an empty
+      // or default-strategy-less `conflictResolution` AND the existing project
+      // state currently HAS a ResolverConfig. Mirror the interactive DISABLE_CONFLICT
+      // arm by pre-injecting _version/_deleted/_lastChangedAt into every @model in
+      // schema.graphql before the transformer strips them on the next push.
+      // The caller can opt out by passing `preserveSyncFields: false` in the payload.
+      const isDisablingConflict =
+        !updates.conflictResolution.defaultResolutionStrategy &&
+        _.isEmpty(updates.conflictResolution.perModelResolutionStrategy);
+      const preserveSyncFields =
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (updates.conflictResolution as any).preserveSyncFields !== false;
+      if (isDisablingConflict && preserveSyncFields) {
+        await this.preserveSyncFieldsOnDisable(resourceDir);
+      }
+      // Strip the non-standard flag before downstream consumers see it.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      delete (updates.conflictResolution as any).preserveSyncFields;
+
       updates.conflictResolution = await this.createResolverResources(updates.conflictResolution);
       await writeResolverConfig(updates.conflictResolution, resourceDir);
     }
@@ -177,6 +198,77 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
 
   private writeSchema = (resourceDir: string, schema: string): void => {
     fs.writeFileSync(resourceDir, schema);
+  };
+
+  /**
+   * Before disabling conflict resolution (removing it from transform.conf.json),
+   * mutate the user's `schema.graphql` so every `@model` declares the three
+   * DataStore metadata fields (`_version`, `_deleted`, `_lastChangedAt`) as
+   * regular user fields. Otherwise the transformer will strip those fields
+   * from the generated AppSync schema on the next push, and any frontend code
+   * still sending them in mutation inputs will fail with a GraphQL validation
+   * error.
+   *
+   * See: https://github.com/aws-amplify/docs/pull/8578
+   */
+  private preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<void> => {
+    const schemaPath = path.join(resourceDir, 'schema.graphql');
+    if (!(await fs.pathExists(schemaPath))) {
+      printer.warn(
+        `preserveSyncFields: no schema.graphql at ${schemaPath} — skipping metadata field injection. ` +
+          `If you use the split schema/ directory layout you will need to add _version/_deleted/_lastChangedAt manually.`,
+      );
+      return;
+    }
+
+    const original = (await fs.readFile(schemaPath)).toString();
+    const { updated, modifiedModels, manyToManyModels } = injectSyncFields(original);
+
+    if (modifiedModels.length === 0) {
+      printer.info('All @model types already declare _version / _deleted / _lastChangedAt — no schema changes needed.');
+    } else {
+      await fs.writeFile(schemaPath, updated);
+      printer.info(
+        chalk.cyan(
+          `Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp into ${modifiedModels.length} ` +
+            `@model type${modifiedModels.length === 1 ? '' : 's'}:`,
+        ),
+      );
+      modifiedModels.forEach((name) => printer.info(`  • ${name}`));
+    }
+
+    printer.warn('');
+    printer.warn(chalk.yellow.bold('⚠  DataStore → AppSync migration checklist'));
+    printer.warn(chalk.yellow('   Disabling conflict detection is a breaking change for any code using `DataStore.*`.'));
+    printer.warn('');
+
+    if (manyToManyModels.length > 0) {
+      printer.warn(
+        chalk.yellow.bold('   @manyToMany join types NOT modified (auto-synthesized, not in schema.graphql):'),
+      );
+      manyToManyModels.forEach((name) => printer.warn(chalk.yellow(`     • ${name}`)));
+      printer.warn(
+        chalk.yellow(
+          '   Soft-deleted rows in join tables will linger in DynamoDB after disable. A one-time ' +
+            'cleanup pass is recommended — see migration guide below.',
+        ),
+      );
+      printer.warn('');
+    }
+
+    printer.warn(chalk.yellow.bold('   Runtime behaviour changes you must handle in your app:'));
+    printer.warn(chalk.yellow('     • `delete*` mutations become HARD deletes (row is removed from DynamoDB).'));
+    printer.warn(chalk.yellow('       Any UI that relied on `_deleted: true` soft-deletes will silently stop working.'));
+    printer.warn(chalk.yellow('     • `_version` is NO LONGER auto-incremented by the AppSync resolver.'));
+    printer.warn(chalk.yellow('       Mutations now accept the field but the value is meaningless.'));
+    printer.warn(
+      chalk.yellow(
+        '     • `sync*` queries and `observeQuery` subscriptions are GONE — migrate to `list*` + `onCreate*`/`onUpdate*`/`onDelete*`.',
+      ),
+    );
+    printer.warn('');
+    printer.warn(chalk.yellow('   Migration guide: https://github.com/aws-amplify/docs/pull/8578'));
+    printer.warn('');
   };
 
   private getResourceDir = (apiName: string): string => pathManager.getResourceDirectoryPath(undefined, category, apiName);
