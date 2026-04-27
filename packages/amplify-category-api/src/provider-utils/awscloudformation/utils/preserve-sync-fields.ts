@@ -3,7 +3,7 @@
  * on `@model` types when a user disables conflict detection, so existing
  * DataStore client code keeps working.
  *
- * See: https://github.com/aws-amplify/docs/pull/8578
+ * See: https://docs.amplify.aws/gen1/react/build-a-backend/more-features/datastore/migrate-from-datastore
  */
 import * as path from 'path';
 import * as fs from 'fs-extra';
@@ -23,7 +23,7 @@ import {
 } from 'graphql';
 
 /** URL of the DataStore → AppSync migration guide, surfaced in warning messages. */
-export const MIGRATION_GUIDE_URL = 'https://github.com/aws-amplify/docs/pull/8578';
+export const MIGRATION_GUIDE_URL = 'https://docs.amplify.aws/gen1/react/build-a-backend/more-features/datastore/migrate-from-datastore';
 
 /** The three DataStore metadata field names, in the order AppSync emits them. */
 export const SYNC_FIELD_NAMES = ['_version', '_deleted', '_lastChangedAt'] as const;

@@ -395,7 +395,7 @@ const updateApiInputWalkthrough = async (
       await preserveSyncFieldsOnDisable(resourceDir);
     } else {
       printer.info('Skipped sync field preservation. Clients that still send _version / _deleted / _lastChangedAt will break.');
-      printer.info('Migration guide: https://github.com/aws-amplify/docs/pull/8578');
+      printer.info('Migration guide: https://docs.amplify.aws/gen1/react/build-a-backend/more-features/datastore/migrate-from-datastore');
     }
   } else if (updateOption === 'AUTH_MODE') {
     ({ authConfig, defaultAuthType } = await askDefaultAuthQuestion(context));
