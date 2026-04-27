@@ -182,19 +182,8 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
   };
 
   /**
-   * Decide whether the incoming headless update represents a transition
-   * from "DataStore enabled" to "DataStore disabled", and if so run the
-   * schema injection.
-   *
-   * The payload must satisfy both of:
-   *   1. No `defaultResolutionStrategy` and no `perModelResolutionStrategy`
-   *      (i.e., payload is asking to disable conflict resolution).
-   *   2. The project currently HAS a `ResolverConfig` in
-   *      `transform.conf.json` (i.e., we're truly transitioning
-   *      enabled → disabled, not being called on a fresh project).
-   *
-   * @param updates the incoming service modification.
-   * @param resourceDir absolute path to `amplify/backend/api/<name>/`.
+   * If this headless update is a true DataStore enabled → disabled
+   * transition, inject the sync fields before the transformer strips them.
    */
   private maybePreserveSyncFieldsOnDisable = async (
     updates: AppSyncServiceModification,

@@ -1,26 +1,6 @@
 /**
- * Unit tests for the three exports of `utils/preserve-sync-fields`:
- *
- *   - `injectSyncFields(schemaText)`        — pure string rewrite.
- *   - `buildMigrationChecklist(options)`    — pure checklist-line builder.
- *   - `preserveSyncFieldsOnDisable(dir)`    — end-to-end filesystem routine.
- *
- * Coverage:
- *
- *  - happy path: fields added to a bare @model
- *  - idempotency (running twice is a no-op)
- *  - partial state (only one or two sync fields already present)
- *  - scope: non-@model object types are ignored
- *  - @manyToMany relations are enumerated by relationName + source models
- *  - @auth / @hasMany / @belongsTo / @index survive round-tripping
- *  - correct scalar types (Int, Boolean, AWSTimestamp)
- *  - checklist content for the three distinct cases (nothing-to-do,
- *    schema-modified-no-m2m, m2m-detected)
- *  - end-to-end on a tmp directory: writes schema, creates backup,
- *    soft-fails when schema.graphql is missing.
- *
- * Colour codes: we disable chalk globally here so assertions can match on
- * plain substrings without worrying about ANSI escape bytes.
+ * Unit tests for `utils/preserve-sync-fields`. `chalk.level = 0` so assertions
+ * can match on plain substrings without ANSI escapes.
  */
 import * as path from 'path';
 import * as os from 'os';
@@ -38,16 +18,7 @@ import {
 jest.mock('@aws-amplify/amplify-prompts');
 chalk.level = 0;
 
-/**
- * Assert that all three sync fields are present on a given @model type in
- * the printed schema. Walks the AST so directive braces don't confuse naive
- * regex matching.
- *
- * @param schema GraphQL SDL string to inspect.
- * @param typeName Name of the object type to check.
- * @returns `true` when all three sync fields are present with the expected
- *          scalar types; `false` otherwise.
- */
+/** True iff all three sync fields are present with correct scalar types. */
 /* eslint-disable no-underscore-dangle, @typescript-eslint/no-var-requires, global-require */
 const hasAllSyncFields = (schema: string, typeName: string): boolean => {
   const { parse, visit } = require('graphql');

@@ -1,22 +1,7 @@
 /**
- * Preserve the DataStore conflict-resolution metadata fields
- * (`_version`, `_deleted`, `_lastChangedAt`) when a user disables conflict
- * detection on an `@model`-based AppSync API.
- *
- * The GraphQL transformer normally owns these three fields — it emits them
- * on every generated object type and every `Update…Input` as long as
- * conflict resolution is on, and strips them the moment it is off. Any
- * frontend code that still sends them (which is every DataStore client)
- * then fails AppSync's request validation. This module rewrites the user's
- * `schema.graphql` so the fields are declared as regular user fields
- * BEFORE the transformer runs, keeping them in the schema (no longer
- * server-managed, but present and queryable) across the disable.
- *
- * Exports:
- *   - `injectSyncFields(schemaText)` — pure rewrite of a schema string.
- *   - `buildMigrationChecklist(options)` — pure console-output builder.
- *   - `preserveSyncFieldsOnDisable(resourceDir)` — end-to-end filesystem routine.
- *   - Constants: `SYNC_FIELD_NAMES`, `MIGRATION_GUIDE_URL`, `SCHEMA_BACKUP_FILENAME`.
+ * Preserves the DataStore sync fields (`_version`, `_deleted`, `_lastChangedAt`)
+ * on `@model` types when a user disables conflict detection, so existing
+ * DataStore client code keeps working.
  *
  * See: https://github.com/aws-amplify/docs/pull/8578
  */
@@ -37,23 +22,13 @@ import {
   Kind,
 } from 'graphql';
 
-/**
- * URL of the migration guide surfaced in every warning message emitted by
- * this module. Kept as a named export so downstream docs/tests can reference
- * the single source of truth.
- */
+/** URL of the DataStore → AppSync migration guide, surfaced in warning messages. */
 export const MIGRATION_GUIDE_URL = 'https://github.com/aws-amplify/docs/pull/8578';
 
-/**
- * The three DataStore/conflict-resolution metadata field names, in the
- * canonical order AppSync emits them.
- */
+/** The three DataStore metadata field names, in the order AppSync emits them. */
 export const SYNC_FIELD_NAMES = ['_version', '_deleted', '_lastChangedAt'] as const;
 
-/**
- * Mapping of sync-field name → GraphQL scalar type name used by AppSync.
- * `_lastChangedAt` uses the AppSync built-in `AWSTimestamp` scalar (epoch millis).
- */
+/** Scalar type for each sync field. `_lastChangedAt` uses AppSync's `AWSTimestamp`. */
 const SYNC_FIELD_TYPES: Record<(typeof SYNC_FIELD_NAMES)[number], string> = {
   _version: 'Int',
   _deleted: 'Boolean',
@@ -61,74 +36,39 @@ const SYNC_FIELD_TYPES: Record<(typeof SYNC_FIELD_NAMES)[number], string> = {
 };
 
 /**
- * A single `@manyToMany` relation discovered during schema traversal.
- *
- * `relationName` matches the `relationName` argument the user passed, which
- * is also the name of the join type that the GraphQL transformer synthesizes
- * (e.g. `@manyToMany(relationName: "CardLabel")` → type `CardLabel`).
- *
- * `sourceModels` holds the model names on both sides of the relation —
- * usually two, but the helper does not enforce that.
+ * A `@manyToMany` relation discovered during schema traversal. `relationName`
+ * is also the name of the join type the transformer synthesizes.
  */
 export interface ManyToManyRelation {
-  /** The value of the `relationName` argument; also the synthesized join type name. */
+  /** Value of the `relationName` arg; also the synthesized join type name. */
   relationName: string;
-  /** Names of user `@model` types that declared a field with this relationName. */
+  /** `@model` types that declared a field with this relationName. */
   sourceModels: string[];
 }
 
-/**
- * Result of {@link injectSyncFields}.
- */
+/** Result of {@link injectSyncFields}. */
 export interface InjectSyncFieldsResult {
-  /** Rewritten schema text (printed back from the AST). */
+  /** Rewritten schema text. */
   updated: string;
-  /**
-   * Names of object types annotated with `@model` that were modified
-   * (at least one of the three fields was missing and has been added).
-   * Models that already declared all three fields are NOT included.
-   */
+  /** `@model` types where at least one sync field was added. */
   modifiedModels: string[];
-  /**
-   * Details of every `@manyToMany` relation discovered in the user's
-   * schema, keyed by `relationName`. For each one the transformer
-   * synthesizes a hidden join type (e.g. `relationName: "CardLabel"`
-   * → synthesized `type CardLabel @model`). Those synthesized types are
-   * NOT present in user-space `schema.graphql` and therefore CANNOT be
-   * injected by this helper.
-   */
+  /** `@manyToMany` relations discovered (their join types cannot be injected). */
   manyToManyRelations: ManyToManyRelation[];
 }
 
-/**
- * Options for {@link buildMigrationChecklist}.
- */
+/** Options for {@link buildMigrationChecklist}. */
 export interface MigrationChecklistOptions {
-  /** Names of `@model` types that had one or more sync fields added. */
   modifiedModels: string[];
-  /** Detail of `@manyToMany` relations the caller discovered. */
   manyToManyRelations: ManyToManyRelation[];
 }
 
-/**
- * A single line of the migration checklist classified for the caller to
- * route to the right `printer` method (`info` / `warn`).
- */
+/** One line of the migration checklist, tagged with the target log level. */
 export interface ChecklistLine {
-  /** Which log level this line is meant for. */
   level: 'info' | 'warn';
-  /** Pre-formatted message text, possibly with ANSI colour codes. */
   message: string;
 }
 
-/**
- * Read the `relationName` from a `@manyToMany(relationName: "Foo")` directive.
- * Returns `undefined` when the argument is absent or not a string literal
- * (handled gracefully to avoid crashing on malformed schemas).
- *
- * @param directive AST node for the `@manyToMany(...)` directive.
- * @returns the `relationName` string, or `undefined` if not present/invalid.
- */
+/** Read `relationName` from a `@manyToMany(relationName: "Foo")` directive. */
 const getRelationName = (directive: DirectiveNode): string | undefined => {
   const relArg = (directive.arguments ?? []).find((a: ArgumentNode) => a.name.value === 'relationName');
   if (!relArg) return undefined;
@@ -136,13 +76,7 @@ const getRelationName = (directive: DirectiveNode): string | undefined => {
   return (relArg.value as StringValueNode).value;
 };
 
-/**
- * Build a synthetic `FieldDefinitionNode` for one of the three sync fields.
- * Uses only named scalar types, so no wrappers are needed.
- *
- * @param fieldName one of the three sync field names.
- * @returns a `FieldDefinitionNode` with the correct scalar type and no directives.
- */
+/** Build a synthetic AST node for one sync field. */
 const buildSyncFieldNode = (fieldName: (typeof SYNC_FIELD_NAMES)[number]): FieldDefinitionNode => ({
   kind: Kind.FIELD_DEFINITION,
   name: { kind: Kind.NAME, value: fieldName },
@@ -154,25 +88,12 @@ const buildSyncFieldNode = (fieldName: (typeof SYNC_FIELD_NAMES)[number]): Field
 });
 
 /**
- * Pre-inject the DataStore sync metadata fields (`_version`, `_deleted`,
- * `_lastChangedAt`) into every `@model` in the given schema.
+ * Inject `_version`, `_deleted`, `_lastChangedAt` into every `@model` that
+ * doesn't already declare them. Idempotent; partial states are filled in;
+ * non-`@model` types and other directives are left untouched.
  *
- * Behaviour:
- *  - Idempotent: a model that already declares all three fields is left
- *    alone and is not listed in `modifiedModels`.
- *  - Partial: a model that declares some but not all three fields gets the
- *    missing ones added (the existing declarations are preserved verbatim).
- *  - Scope: only object types with an `@model` directive are considered.
- *    Non-`@model` types (e.g. enums, custom types) are not touched.
- *  - `@manyToMany` awareness: every occurrence of `@manyToMany(relationName: "...")`
- *    is recorded against the relation name. The **synthesized** join type
- *    (not present in user schema) is NOT injected — the caller is expected
- *    to surface a warning via {@link buildMigrationChecklist}.
- *  - Directive preservation: existing field directives (`@auth`, `@hasMany`,
- *    `@belongsTo`, `@index`, …) on other fields are untouched.
- *
- * @param schemaText Raw contents of `amplify/backend/api/<name>/schema.graphql`.
- * @returns Object with the rewritten schema and the lists of affected types.
+ * `@manyToMany` occurrences are recorded but NOT injected — the synthesized
+ * join type lives outside the user schema.
  */
 export const injectSyncFields = (schemaText: string): InjectSyncFieldsResult => {
   const ast: DocumentNode = parse(schemaText, { noLocation: true });
@@ -232,19 +153,9 @@ export const injectSyncFields = (schemaText: string): InjectSyncFieldsResult => 
 };
 
 /**
- * Build the multi-line migration checklist emitted to the console after a
- * successful schema injection. Centralised so the interactive and headless
- * codepaths emit the exact same guidance.
- *
- * The caller is responsible for routing each line to the appropriate
- * `printer` method based on the `level` field.
- *
- * `chalk` is called unconditionally; it auto-detects whether the output
- * stream is a TTY and no-ops otherwise, so log capture / CI / piped output
- * all get clean strings.
- *
- * @param options see {@link MigrationChecklistOptions}.
- * @returns array of `{ level, message }` ready to pass to `printer.info` / `printer.warn`.
+ * Build the migration checklist shared by the interactive and headless
+ * disable codepaths. Caller routes each line to `printer.info` / `printer.warn`
+ * based on its `level`.
  */
 export const buildMigrationChecklist = (options: MigrationChecklistOptions): ChecklistLine[] => [
   ...buildInjectionSummary(options.modifiedModels),
@@ -254,13 +165,7 @@ export const buildMigrationChecklist = (options: MigrationChecklistOptions): Che
   ...buildFooter(),
 ];
 
-/**
- * Build the opening block: either an "already done, no changes" info line
- * or a cyan "Injected … into N @model types" line with a bullet per model.
- *
- * @param modifiedModels model names returned from `injectSyncFields`.
- * @returns checklist lines describing what (if anything) was injected.
- */
+/** Opening block: either "no changes needed" or the per-model injection list. */
 const buildInjectionSummary = (modifiedModels: string[]): ChecklistLine[] => {
   if (modifiedModels.length === 0) {
     return [
@@ -283,11 +188,7 @@ const buildInjectionSummary = (modifiedModels: string[]): ChecklistLine[] => {
   ];
 };
 
-/**
- * Build the "DataStore → AppSync migration checklist" banner.
- *
- * @returns two warn lines (banner + intro) surrounded by blank spacer lines.
- */
+/** Banner + intro for the migration checklist. */
 const buildHeader = (): ChecklistLine[] => [
   { level: 'warn', message: '' },
   { level: 'warn', message: chalk.yellow.bold('⚠  DataStore → AppSync migration checklist') },
@@ -298,13 +199,7 @@ const buildHeader = (): ChecklistLine[] => [
   { level: 'warn', message: '' },
 ];
 
-/**
- * Build the @manyToMany-specific warning paragraph, or return `[]` if no
- * @manyToMany relations were detected.
- *
- * @param relations relations returned from `injectSyncFields`.
- * @returns checklist lines explaining the impact of synthesized join types.
- */
+/** `@manyToMany` section, empty when no such relations exist. */
 const buildManyToManySection = (relations: ManyToManyRelation[]): ChecklistLine[] => {
   if (relations.length === 0) return [];
   const lines: ChecklistLine[] = [
@@ -335,13 +230,7 @@ const buildManyToManySection = (relations: ManyToManyRelation[]): ChecklistLine[
   return lines;
 };
 
-/**
- * Build the longest section — the three runtime-behaviour warnings about
- * hard-deletes, non-incrementing `_version`, and the absence of sync*
- * queries / observeQuery.
- *
- * @returns checklist lines for the runtime-changes block.
- */
+/** Runtime-behaviour warnings (hard delete, non-incrementing _version, missing sync queries). */
 const buildRuntimeChangesSection = (): ChecklistLine[] => {
   const prose = [
     '     • delete<Model> mutations become HARD deletes (the DynamoDB row is removed).',
@@ -364,29 +253,17 @@ const buildRuntimeChangesSection = (): ChecklistLine[] => {
   ];
 };
 
-/**
- * Build the footer: a blank line, the migration-guide URL, and a trailing spacer.
- *
- * @returns three checklist lines.
- */
+/** Footer: migration-guide URL surrounded by blank spacers. */
 const buildFooter = (): ChecklistLine[] => [
   { level: 'warn', message: '' },
   { level: 'warn', message: chalk.yellow(`   Migration guide: ${MIGRATION_GUIDE_URL}`) },
   { level: 'warn', message: '' },
 ];
 
-/**
- * File name of the one-time backup written next to `schema.graphql` the first
- * time {@link preserveSyncFieldsOnDisable} runs, so users can diff
- * before/after.
- */
+/** Backup file written next to `schema.graphql` on the first disable. */
 export const SCHEMA_BACKUP_FILENAME = 'schema.graphql.pre-disable-backup';
 
-/**
- * Route a list of {@link ChecklistLine}s to `printer`, per-line level.
- *
- * @param lines output of {@link buildMigrationChecklist}.
- */
+/** Route checklist lines to `printer` per their `level`. */
 const emitChecklist = (lines: ChecklistLine[]): void => {
   for (const line of lines) {
     if (line.level === 'warn') {
@@ -398,22 +275,11 @@ const emitChecklist = (lines: ChecklistLine[]): void => {
 };
 
 /**
- * End-to-end "preserve sync fields" side-effecting routine.
+ * Rewrite `<resourceDir>/schema.graphql` to keep the three sync fields,
+ * write a one-time backup, and emit the migration checklist.
  *
- * Reads `<resourceDir>/schema.graphql`, runs {@link injectSyncFields} on it,
- * writes the rewritten schema back (creating a one-time backup at
- * `<resourceDir>/schema.graphql.pre-disable-backup`), and emits the migration
- * checklist to `printer`. Used by both the interactive `amplify update api`
- * walkthrough and the headless `cfn-api-artifact-handler` so the two
- * codepaths behave identically.
- *
- * Soft-fail semantics: any filesystem or parser error produces a
- * `printer.warn` describing what to do manually and returns. Disabling
- * conflict resolution is a destructive operation the user has explicitly
- * requested — failing loud here would strand them mid-update with a
- * confusing stack trace.
- *
- * See: https://github.com/aws-amplify/docs/pull/8578
+ * Soft-fails on I/O or parse errors — the walkthrough shouldn't crash
+ * mid-disable.
  *
  * @param resourceDir Absolute path to `amplify/backend/api/<name>/`.
  */
