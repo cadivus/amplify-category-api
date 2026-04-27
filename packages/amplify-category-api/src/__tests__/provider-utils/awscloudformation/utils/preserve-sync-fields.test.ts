@@ -2,11 +2,13 @@
  * Unit tests for `utils/preserve-sync-fields`. `chalk.level = 0` so assertions
  * can match on plain substrings without ANSI escapes.
  */
+/* eslint-disable no-underscore-dangle */
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs-extra';
 import chalk from 'chalk';
 import {
+  __resetVerboseChecklistGuard,
   buildMigrationChecklist,
   injectSyncFields,
   MIGRATION_GUIDE_URL,
@@ -14,12 +16,22 @@ import {
   SCHEMA_BACKUP_FILENAME,
   SYNC_FIELD_NAMES,
 } from '../../../../provider-utils/awscloudformation/utils/preserve-sync-fields';
+import { printer } from '@aws-amplify/amplify-prompts';
 
 jest.mock('@aws-amplify/amplify-prompts');
 chalk.level = 0;
 
+/** Cast the mocked printer members to jest.Mock so test code can inspect call counts. */
+const mockedPrinter = printer as jest.Mocked<typeof printer>;
+
+/** Reset the process-scoped verbose-checklist flag between tests. */
+beforeEach(() => {
+  __resetVerboseChecklistGuard();
+  jest.clearAllMocks();
+});
+
 /** True iff all three sync fields are present with correct scalar types. */
-/* eslint-disable no-underscore-dangle, @typescript-eslint/no-var-requires, global-require */
+/* eslint-disable @typescript-eslint/no-var-requires, global-require */
 const hasAllSyncFields = (schema: string, typeName: string): boolean => {
   const { parse, visit } = require('graphql');
   const ast = parse(schema, { noLocation: true });
@@ -44,7 +56,7 @@ const hasAllSyncFields = (schema: string, typeName: string): boolean => {
   });
   return found._version && found._deleted && found._lastChangedAt;
 };
-/* eslint-enable no-underscore-dangle, @typescript-eslint/no-var-requires, global-require */
+/* eslint-enable @typescript-eslint/no-var-requires, global-require */
 
 describe('injectSyncFields', () => {
   it('adds the three sync fields to a @model type that lacks them', () => {
@@ -295,6 +307,34 @@ describe('buildMigrationChecklist', () => {
     const text = lines.map((l) => l.message).join('\n');
     expect(text).toMatch(/1 @model type:$/m);
   });
+
+  it('omits the verbose block when includeVerboseChecklist is false', () => {
+    const lines = buildMigrationChecklist({
+      modifiedModels: ['Todo'],
+      manyToManyRelations: [{ relationName: 'TodoTag', sourceModels: ['Todo', 'Tag'] }],
+      includeVerboseChecklist: false,
+    });
+    const text = lines.map((l) => l.message).join('\n');
+    expect(text).toContain('Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp');
+    expect(text).toContain('  • Todo');
+    expect(text).not.toContain('DataStore → AppSync migration checklist');
+    expect(text).not.toContain('Runtime behaviour changes');
+    expect(text).not.toContain('@manyToMany relations detected');
+    expect(text).not.toContain(MIGRATION_GUIDE_URL);
+  });
+
+  it('includeVerboseChecklist=true (default) matches the unspecified default', () => {
+    const explicit = buildMigrationChecklist({
+      modifiedModels: ['Todo'],
+      manyToManyRelations: [],
+      includeVerboseChecklist: true,
+    });
+    const implicit = buildMigrationChecklist({
+      modifiedModels: ['Todo'],
+      manyToManyRelations: [],
+    });
+    expect(explicit).toEqual(implicit);
+  });
 });
 
 describe('preserveSyncFieldsOnDisable', () => {
@@ -337,5 +377,49 @@ describe('preserveSyncFieldsOnDisable', () => {
   it('soft-fails when schema.graphql is missing (no throw)', async () => {
     await expect(preserveSyncFieldsOnDisable(tmpDir)).resolves.toBeUndefined();
     expect(await fs.pathExists(path.join(tmpDir, SCHEMA_BACKUP_FILENAME))).toBe(false);
+  });
+
+  it('prints the verbose migration checklist only once per process', async () => {
+    const schemaPath = path.join(tmpDir, 'schema.graphql');
+    await fs.writeFile(schemaPath, 'type Todo @model {\n  id: ID!\n}\n');
+
+    await preserveSyncFieldsOnDisable(tmpDir);
+    const firstCallWarnMessages = mockedPrinter.warn.mock.calls.map((args) => String(args[0]));
+    const firstCallInfoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0]));
+    expect(firstCallWarnMessages.join('\n')).toContain('DataStore → AppSync migration checklist');
+    expect(firstCallWarnMessages.join('\n')).toContain(MIGRATION_GUIDE_URL);
+    expect(firstCallInfoMessages.join('\n')).toContain('Injected _version');
+
+    // Second call on the now-already-injected schema: no verbose warn block.
+    mockedPrinter.warn.mockClear();
+    mockedPrinter.info.mockClear();
+
+    await preserveSyncFieldsOnDisable(tmpDir);
+    const secondCallWarnMessages = mockedPrinter.warn.mock.calls.map((args) => String(args[0]));
+    const secondCallInfoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0]));
+    expect(secondCallWarnMessages.join('\n')).not.toContain('DataStore → AppSync migration checklist');
+    expect(secondCallWarnMessages.join('\n')).not.toContain(MIGRATION_GUIDE_URL);
+    expect(secondCallWarnMessages.join('\n')).not.toContain('Runtime behaviour changes');
+    // Short summary line is still emitted (on printer.info) — it's per-invocation status.
+    expect(secondCallInfoMessages.join('\n')).toContain('already declare _version');
+  });
+
+  it('resets the guard across processes via __resetVerboseChecklistGuard', async () => {
+    const schemaPath = path.join(tmpDir, 'schema.graphql');
+    await fs.writeFile(schemaPath, 'type Todo @model {\n  id: ID!\n}\n');
+
+    await preserveSyncFieldsOnDisable(tmpDir);
+    expect(
+      mockedPrinter.warn.mock.calls.some((args) => String(args[0]).includes('DataStore → AppSync migration checklist')),
+    ).toBe(true);
+
+    mockedPrinter.warn.mockClear();
+
+    // Simulate a new process by resetting the guard.
+    __resetVerboseChecklistGuard();
+    await preserveSyncFieldsOnDisable(tmpDir);
+    expect(
+      mockedPrinter.warn.mock.calls.some((args) => String(args[0]).includes('DataStore → AppSync migration checklist')),
+    ).toBe(true);
   });
 });

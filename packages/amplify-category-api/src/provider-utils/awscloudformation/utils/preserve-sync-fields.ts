@@ -60,6 +60,14 @@ export interface InjectSyncFieldsResult {
 export interface MigrationChecklistOptions {
   modifiedModels: string[];
   manyToManyRelations: ManyToManyRelation[];
+  /**
+   * When `false`, emit only the short per-invocation summary (injection count
+   * or "no changes needed") and skip the verbose migration guide block.
+   * Defaults to `true`. Process-scoped deduplication uses this to suppress
+   * repeat prints when `preserveSyncFieldsOnDisable` is called more than once
+   * per CLI invocation (interactive walkthrough → headless artifact handler).
+   */
+  includeVerboseChecklist?: boolean;
 }
 
 /** One line of the migration checklist, tagged with the target log level. */
@@ -156,14 +164,25 @@ export const injectSyncFields = (schemaText: string): InjectSyncFieldsResult => 
  * Build the migration checklist shared by the interactive and headless
  * disable codepaths. Caller routes each line to `printer.info` / `printer.warn`
  * based on its `level`.
+ *
+ * When `includeVerboseChecklist` is `false`, only the short injection summary
+ * is returned (no header, no manyToMany block, no runtime-changes block, no
+ * footer). This is how {@link preserveSyncFieldsOnDisable} suppresses the
+ * repeat verbose block on its second call within a single CLI invocation.
  */
-export const buildMigrationChecklist = (options: MigrationChecklistOptions): ChecklistLine[] => [
-  ...buildInjectionSummary(options.modifiedModels),
-  ...buildHeader(),
-  ...buildManyToManySection(options.manyToManyRelations),
-  ...buildRuntimeChangesSection(),
-  ...buildFooter(),
-];
+export const buildMigrationChecklist = (options: MigrationChecklistOptions): ChecklistLine[] => {
+  const summary = buildInjectionSummary(options.modifiedModels);
+  if (options.includeVerboseChecklist === false) {
+    return summary;
+  }
+  return [
+    ...summary,
+    ...buildHeader(),
+    ...buildManyToManySection(options.manyToManyRelations),
+    ...buildRuntimeChangesSection(),
+    ...buildFooter(),
+  ];
+};
 
 /** Opening block: either "no changes needed" or the per-model injection list. */
 const buildInjectionSummary = (modifiedModels: string[]): ChecklistLine[] => {
@@ -263,6 +282,34 @@ const buildFooter = (): ChecklistLine[] => [
 /** Backup file written next to `schema.graphql` on the first disable. */
 export const SCHEMA_BACKUP_FILENAME = 'schema.graphql.pre-disable-backup';
 
+/**
+ * Process-scoped flag: has the verbose migration checklist been emitted yet?
+ *
+ * Within a single CLI invocation, `preserveSyncFieldsOnDisable` can be reached
+ * twice — once from the interactive `appSync-walkthrough.ts` after the user
+ * confirms the prompt, and a second time from `cfn-api-artifact-handler.ts`
+ * when the same CLI session flushes the headless update during `amplify push`.
+ * Both entry points are intentional (one is interactive, the other is a
+ * machine-readable payload path); we don't want to re-architect the call
+ * graph just to suppress one log block. Instead we set this flag the first
+ * time the verbose checklist is emitted and downgrade every subsequent call
+ * within the same process to the short "already injected" summary.
+ *
+ * The flag resets between Node processes, so each fresh CLI invocation gets
+ * one verbose print. It is intentionally NOT persisted to disk.
+ */
+let verboseChecklistAlreadyEmitted = false;
+
+/**
+ * Reset the process-scoped "verbose checklist already emitted" flag.
+ *
+ * Exported only for tests — production callers have no reason to call this.
+ * The `__` prefix follows the internal-API convention.
+ */
+export const __resetVerboseChecklistGuard = (): void => {
+  verboseChecklistAlreadyEmitted = false;
+};
+
 /** Route checklist lines to `printer` per their `level`. */
 const emitChecklist = (lines: ChecklistLine[]): void => {
   for (const line of lines) {
@@ -322,10 +369,15 @@ export const preserveSyncFieldsOnDisable = async (resourceDir: string): Promise<
     await fs.writeFile(schemaPath, result.updated);
   }
 
+  const includeVerboseChecklist = !verboseChecklistAlreadyEmitted;
   emitChecklist(
     buildMigrationChecklist({
       modifiedModels: result.modifiedModels,
       manyToManyRelations: result.manyToManyRelations,
+      includeVerboseChecklist,
     }),
   );
+  if (includeVerboseChecklist) {
+    verboseChecklistAlreadyEmitted = true;
+  }
 };
