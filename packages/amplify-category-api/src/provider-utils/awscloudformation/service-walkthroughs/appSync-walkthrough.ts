@@ -386,7 +386,17 @@ const updateApiInputWalkthrough = async (
     resolverConfig = await askResolverConflictHandlerQuestion(context, modelTypes);
   } else if (updateOption === 'DISABLE_CONFLICT') {
     resolverConfig = {};
-    await preserveSyncFieldsOnDisable(resourceDir);
+    const shouldPreserveSyncFields = await prompter.yesOrNo(
+      'Preserve _version, _deleted, and _lastChangedAt fields on each @model? '
+        + '(Recommended — keeps existing DataStore client code working after conflict detection is disabled)',
+      true,
+    );
+    if (shouldPreserveSyncFields) {
+      await preserveSyncFieldsOnDisable(resourceDir);
+    } else {
+      printer.info('Skipped sync field preservation. Clients that still send _version / _deleted / _lastChangedAt will break.');
+      printer.info('Migration guide: https://github.com/aws-amplify/docs/pull/8578');
+    }
   } else if (updateOption === 'AUTH_MODE') {
     ({ authConfig, defaultAuthType } = await askDefaultAuthQuestion(context));
     authConfig = await askAdditionalAuthQuestions(context, authConfig, defaultAuthType);
