@@ -1,32 +1,21 @@
-/**
- * Unit tests for `utils/preserve-sync-fields`. `chalk.level = 0` so assertions
- * can match on plain substrings without ANSI escapes.
- */
+/** Unit tests for `utils/preserve-sync-fields`. */
 /* eslint-disable no-underscore-dangle */
 import * as path from 'path';
 import * as os from 'os';
 import * as fs from 'fs-extra';
-import chalk from 'chalk';
+import { printer } from '@aws-amplify/amplify-prompts';
 import {
-  __resetVerboseChecklistGuard,
-  buildMigrationChecklist,
   injectSyncFields,
   MIGRATION_GUIDE_URL,
   preserveSyncFieldsOnDisable,
   SCHEMA_BACKUP_FILENAME,
-  SYNC_FIELD_NAMES,
 } from '../../../../provider-utils/awscloudformation/utils/preserve-sync-fields';
-import { printer } from '@aws-amplify/amplify-prompts';
 
 jest.mock('@aws-amplify/amplify-prompts');
-chalk.level = 0;
 
-/** Cast the mocked printer members to jest.Mock so test code can inspect call counts. */
 const mockedPrinter = printer as jest.Mocked<typeof printer>;
 
-/** Reset the process-scoped verbose-checklist flag between tests. */
 beforeEach(() => {
-  __resetVerboseChecklistGuard();
   jest.clearAllMocks();
 });
 
@@ -99,21 +88,6 @@ describe('injectSyncFields', () => {
     expect(result.modifiedModels).toEqual([]);
   });
 
-  it('fills in missing fields when only some of the three are declared', () => {
-    const schema = `
-      type Todo @model {
-        id: ID!
-        title: String!
-        _version: Int
-      }
-    `;
-    const result = injectSyncFields(schema);
-    expect(result.modifiedModels).toEqual(['Todo']);
-    expect(hasAllSyncFields(result.updated, 'Todo')).toBe(true);
-    const versionOccurrences = (result.updated.match(/_version/g) ?? []).length;
-    expect(versionOccurrences).toBe(1);
-  });
-
   it.each([
     ['_version only', 'type T @model { id: ID! _version: Int }'],
     ['_deleted only', 'type T @model { id: ID! _deleted: Boolean }'],
@@ -121,11 +95,11 @@ describe('injectSyncFields', () => {
     ['_version + _deleted', 'type T @model { id: ID! _version: Int _deleted: Boolean }'],
     ['_version + _lastChangedAt', 'type T @model { id: ID! _version: Int _lastChangedAt: AWSTimestamp }'],
     ['_deleted + _lastChangedAt', 'type T @model { id: ID! _deleted: Boolean _lastChangedAt: AWSTimestamp }'],
-  ])('handles mixed state: %s', (_, schema) => {
+  ])('fills in missing fields when some are already declared: %s', (_, schema) => {
     const result = injectSyncFields(schema);
     expect(result.modifiedModels).toEqual(['T']);
     expect(hasAllSyncFields(result.updated, 'T')).toBe(true);
-    for (const field of SYNC_FIELD_NAMES) {
+    for (const field of ['_version', '_deleted', '_lastChangedAt']) {
       const count = (result.updated.match(new RegExp(`${field}:`, 'g')) ?? []).length;
       expect(count).toBe(1);
     }
@@ -193,16 +167,9 @@ describe('injectSyncFields', () => {
       }
     `;
     const result = injectSyncFields(schema);
-    expect(result.manyToManyRelations.map((r) => r.relationName)).toEqual([
-      'PostCollaborator',
-      'PostTag',
-    ]);
-    expect(
-      result.manyToManyRelations.find((r) => r.relationName === 'PostTag')?.sourceModels,
-    ).toEqual(['Post', 'Tag']);
-    expect(
-      result.manyToManyRelations.find((r) => r.relationName === 'PostCollaborator')?.sourceModels,
-    ).toEqual(['Post']);
+    expect(result.manyToManyRelations.map((r) => r.relationName)).toEqual(['PostCollaborator', 'PostTag']);
+    expect(result.manyToManyRelations.find((r) => r.relationName === 'PostTag')?.sourceModels).toEqual(['Post', 'Tag']);
+    expect(result.manyToManyRelations.find((r) => r.relationName === 'PostCollaborator')?.sourceModels).toEqual(['Post']);
   });
 
   it('preserves @auth, @hasMany, @belongsTo, and @index directives on other fields', () => {
@@ -260,83 +227,6 @@ describe('injectSyncFields', () => {
   });
 });
 
-describe('buildMigrationChecklist', () => {
-  it('produces an info line saying no changes when nothing was modified and no m2m', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: [],
-      manyToManyRelations: [],
-    });
-    const infoLines = lines.filter((l) => l.level === 'info').map((l) => l.message);
-    expect(infoLines.join('\n')).toMatch(/already declare _version/);
-    const allText = lines.map((l) => l.message).join('\n');
-    expect(allText).toContain('delete<Model> mutations become HARD deletes');
-    expect(allText).toContain('sync<Model> queries and observeQuery subscriptions no longer exist');
-    expect(allText).toContain(MIGRATION_GUIDE_URL);
-  });
-
-  it('lists every modified model as a separate info line', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: ['User', 'Board', 'Card'],
-      manyToManyRelations: [],
-    });
-    const text = lines.map((l) => l.message).join('\n');
-    expect(text).toContain('Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp into 3 @model types');
-    expect(text).toContain('  • User');
-    expect(text).toContain('  • Board');
-    expect(text).toContain('  • Card');
-  });
-
-  it('enumerates manyToMany relations with join type name and source models', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: ['Card', 'Label'],
-      manyToManyRelations: [
-        { relationName: 'CardLabel', sourceModels: ['Card', 'Label'] },
-      ],
-    });
-    const text = lines.map((l) => l.message).join('\n');
-    expect(text).toContain('CardLabel  (from Card ↔ Label)');
-    expect(text).toContain('synthesized by the transformer');
-    expect(text).toContain('DeleteItem where _deleted == true');
-  });
-
-  it('uses singular "type" when exactly one model was modified', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: ['Todo'],
-      manyToManyRelations: [],
-    });
-    const text = lines.map((l) => l.message).join('\n');
-    expect(text).toMatch(/1 @model type:$/m);
-  });
-
-  it('omits the verbose block when includeVerboseChecklist is false', () => {
-    const lines = buildMigrationChecklist({
-      modifiedModels: ['Todo'],
-      manyToManyRelations: [{ relationName: 'TodoTag', sourceModels: ['Todo', 'Tag'] }],
-      includeVerboseChecklist: false,
-    });
-    const text = lines.map((l) => l.message).join('\n');
-    expect(text).toContain('Injected _version: Int, _deleted: Boolean, _lastChangedAt: AWSTimestamp');
-    expect(text).toContain('  • Todo');
-    expect(text).not.toContain('DataStore → AppSync migration checklist');
-    expect(text).not.toContain('Runtime behaviour changes');
-    expect(text).not.toContain('@manyToMany relations detected');
-    expect(text).not.toContain(MIGRATION_GUIDE_URL);
-  });
-
-  it('includeVerboseChecklist=true (default) matches the unspecified default', () => {
-    const explicit = buildMigrationChecklist({
-      modifiedModels: ['Todo'],
-      manyToManyRelations: [],
-      includeVerboseChecklist: true,
-    });
-    const implicit = buildMigrationChecklist({
-      modifiedModels: ['Todo'],
-      manyToManyRelations: [],
-    });
-    expect(explicit).toEqual(implicit);
-  });
-});
-
 describe('preserveSyncFieldsOnDisable', () => {
   let tmpDir: string;
 
@@ -379,47 +269,33 @@ describe('preserveSyncFieldsOnDisable', () => {
     expect(await fs.pathExists(path.join(tmpDir, SCHEMA_BACKUP_FILENAME))).toBe(false);
   });
 
-  it('prints the verbose migration checklist only once per process', async () => {
+  it('prints the full migration checklist to printer.warn and an injection summary to printer.info', async () => {
     const schemaPath = path.join(tmpDir, 'schema.graphql');
     await fs.writeFile(schemaPath, 'type Todo @model {\n  id: ID!\n}\n');
 
     await preserveSyncFieldsOnDisable(tmpDir);
-    const firstCallWarnMessages = mockedPrinter.warn.mock.calls.map((args) => String(args[0]));
-    const firstCallInfoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0]));
-    expect(firstCallWarnMessages.join('\n')).toContain('DataStore → AppSync migration checklist');
-    expect(firstCallWarnMessages.join('\n')).toContain(MIGRATION_GUIDE_URL);
-    expect(firstCallInfoMessages.join('\n')).toContain('Injected _version');
 
-    // Second call on the now-already-injected schema: no verbose warn block.
-    mockedPrinter.warn.mockClear();
-    mockedPrinter.info.mockClear();
-
-    await preserveSyncFieldsOnDisable(tmpDir);
-    const secondCallWarnMessages = mockedPrinter.warn.mock.calls.map((args) => String(args[0]));
-    const secondCallInfoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0]));
-    expect(secondCallWarnMessages.join('\n')).not.toContain('DataStore → AppSync migration checklist');
-    expect(secondCallWarnMessages.join('\n')).not.toContain(MIGRATION_GUIDE_URL);
-    expect(secondCallWarnMessages.join('\n')).not.toContain('Runtime behaviour changes');
-    // Short summary line is still emitted (on printer.info) — it's per-invocation status.
-    expect(secondCallInfoMessages.join('\n')).toContain('already declare _version');
+    const warnMessages = mockedPrinter.warn.mock.calls.map((args) => String(args[0])).join('\n');
+    const infoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0])).join('\n');
+    expect(warnMessages).toContain('DataStore → AppSync migration checklist');
+    expect(warnMessages).toContain('delete<Model> mutations become HARD deletes');
+    expect(warnMessages).toContain('sync<Model> queries and observeQuery subscriptions no longer exist');
+    expect(warnMessages).toContain(MIGRATION_GUIDE_URL);
+    expect(infoMessages).toContain('Injected _version');
+    expect(infoMessages).toContain('• Todo');
   });
 
-  it('resets the guard across processes via __resetVerboseChecklistGuard', async () => {
+  it('prints the "no changes needed" info when every @model already has the fields', async () => {
     const schemaPath = path.join(tmpDir, 'schema.graphql');
-    await fs.writeFile(schemaPath, 'type Todo @model {\n  id: ID!\n}\n');
+    await fs.writeFile(
+      schemaPath,
+      'type Todo @model {\n  id: ID!\n  _version: Int\n  _deleted: Boolean\n  _lastChangedAt: AWSTimestamp\n}\n',
+    );
 
     await preserveSyncFieldsOnDisable(tmpDir);
-    expect(
-      mockedPrinter.warn.mock.calls.some((args) => String(args[0]).includes('DataStore → AppSync migration checklist')),
-    ).toBe(true);
 
-    mockedPrinter.warn.mockClear();
-
-    // Simulate a new process by resetting the guard.
-    __resetVerboseChecklistGuard();
-    await preserveSyncFieldsOnDisable(tmpDir);
-    expect(
-      mockedPrinter.warn.mock.calls.some((args) => String(args[0]).includes('DataStore → AppSync migration checklist')),
-    ).toBe(true);
+    const infoMessages = mockedPrinter.info.mock.calls.map((args) => String(args[0])).join('\n');
+    expect(infoMessages).toContain('already declare _version');
+    expect(await fs.pathExists(path.join(tmpDir, SCHEMA_BACKUP_FILENAME))).toBe(false);
   });
 });

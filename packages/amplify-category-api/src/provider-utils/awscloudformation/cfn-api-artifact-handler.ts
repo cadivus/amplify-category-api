@@ -182,13 +182,15 @@ class CfnApiArtifactHandler implements ApiArtifactHandler {
   };
 
   /**
-   * If this headless update is a true DataStore enabled → disabled
-   * transition, inject the sync fields before the transformer strips them.
+   * For headless DataStore-disable, inject the sync fields before the
+   * transformer strips them. The interactive walkthrough has its own prompt
+   * for this and calls `preserveSyncFieldsOnDisable` directly.
    */
   private maybePreserveSyncFieldsOnDisable = async (
     updates: AppSyncServiceModification,
     resourceDir: string,
   ): Promise<void> => {
+    if (!this.context.input?.options?.headless) return;
     if (!updates.conflictResolution) return;
     const payloadRequestsDisable =
       !updates.conflictResolution.defaultResolutionStrategy &&

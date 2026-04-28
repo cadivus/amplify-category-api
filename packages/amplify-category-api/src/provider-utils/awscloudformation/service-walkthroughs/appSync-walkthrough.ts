@@ -30,7 +30,7 @@ import { authConfigToAppSyncAuthType } from '../utils/auth-config-to-app-sync-au
 import { checkAppsyncApiResourceMigration } from '../utils/check-appsync-api-migration';
 import { defineGlobalSandboxMode } from '../utils/global-sandbox-mode';
 import { resolverConfigToConflictResolution } from '../utils/resolver-config-to-conflict-resolution-bi-di-mapper';
-import { preserveSyncFieldsOnDisable } from '../utils/preserve-sync-fields';
+import { preserveSyncFieldsOnDisable, MIGRATION_GUIDE_URL } from '../utils/preserve-sync-fields';
 
 const serviceName = 'AppSync';
 const elasticContainerServiceName = 'ElasticContainer';
@@ -395,7 +395,7 @@ const updateApiInputWalkthrough = async (
       await preserveSyncFieldsOnDisable(resourceDir);
     } else {
       printer.info('Skipped sync field preservation. Clients that still send _version / _deleted / _lastChangedAt will break.');
-      printer.info('Migration guide: https://docs.amplify.aws/gen1/react/build-a-backend/more-features/datastore/migrate-from-datastore');
+      printer.info(`Migration guide: ${MIGRATION_GUIDE_URL}`);
     }
   } else if (updateOption === 'AUTH_MODE') {
     ({ authConfig, defaultAuthType } = await askDefaultAuthQuestion(context));
